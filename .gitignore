@@ -1,0 +1,36 @@
+# Model weights & checkpoints
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+models/
+checkpoints/
+
+# Generated outputs
+sample_outputs/*.png
+sample_outputs/*.jpg
+!sample_outputs/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HuggingFace cache
+.cache/

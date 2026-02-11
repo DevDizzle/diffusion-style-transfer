@@ -1,0 +1,11 @@
+diffusers>=0.31.0
+transformers>=4.44.0
+accelerate>=1.2.0
+torch>=2.2.0
+safetensors>=0.4.0
+open-clip-torch>=2.26.0
+Pillow>=10.0.0
+pyyaml>=6.0
+numpy>=1.26.0
+tqdm>=4.66.0
+ip-adapter>=0.1.0
