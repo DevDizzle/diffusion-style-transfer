@@ -311,9 +311,10 @@ class DiffusionPipeline:
             result = self.generate(req)
             results.append(result)
 
+            fname = f"gen_{i:03d}_seed{result.seed}.png"
+            result.image.save(output_path / fname)
+
             if result.safety.is_safe:
-                fname = f"gen_{i:03d}_seed{result.seed}.png"
-                result.image.save(output_path / fname)
                 logger.info(
                     "  ✓ Saved %s (rating=%s, time=%.1fs)",
                     fname,
@@ -322,7 +323,7 @@ class DiffusionPipeline:
                 )
             else:
                 logger.warning(
-                    "  ✗ Filtered: %s", result.filter_reason
+                    "  ✗ Saved FILTERED image %s: %s", fname, result.filter_reason
                 )
 
         safe_count = sum(1 for r in results if r.safety.is_safe)
