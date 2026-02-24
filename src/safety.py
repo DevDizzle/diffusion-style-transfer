@@ -120,9 +120,12 @@ class NSFWClassifier:
 
         safe_sim = (img_feat @ safe_feat.T).item()
         unsafe_sim = (img_feat @ unsafe_feat.T).item()
-        # Softmax over two classes
-        nsfw_prob = np.exp(unsafe_sim) / (np.exp(safe_sim) + np.exp(unsafe_sim))
-        return float(nsfw_prob)
+        
+        # Softmax over two classes with standard CLIP logit scale (100.0)
+        logits = np.array([safe_sim, unsafe_sim]) * 100.0
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
+        return float(probs[1])
 
 
 # ── Brand Consistency Scorer ─────────────────────────────────────────────────
@@ -244,13 +247,21 @@ class ContentRatingSystem:
         img_feat = self._model.encode_image(img_tensor)
         img_feat /= img_feat.norm(dim=-1, keepdim=True)
 
-        concept_scores: dict[str, float] = {}
+        raw_scores: dict[str, float] = {}
         for concept, prompts in self.CONCEPT_BUCKETS.items():
             tokens = self._tokenizer(prompts).to(self.device)
             text_feat = self._model.encode_text(tokens)
             text_feat /= text_feat.norm(dim=-1, keepdim=True)
             sims = (img_feat @ text_feat.T).squeeze(0)
-            concept_scores[concept] = float(sims.max().item())
+            raw_scores[concept] = float(sims.max().item())
+
+        # Convert raw cosine similarities to probabilities via softmax with logit scale
+        keys = list(raw_scores.keys())
+        logits = np.array([raw_scores[k] for k in keys]) * 100.0
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
+        
+        concept_scores = {k: float(p) for k, p in zip(keys, probs)}
 
         # Flag blocked concepts
         flagged = [c for c in self.blocked_concepts if concept_scores.get(c, 0) > 0.25]
