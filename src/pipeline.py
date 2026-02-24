@@ -102,13 +102,25 @@ class DiffusionPipeline:
     def load(self) -> None:
         """Load all models into GPU memory."""
         from diffusers import DPMSolverMultistepScheduler, StableDiffusionXLPipeline
+        from transformers import CLIPVisionModelWithProjection
 
         model_cfg = self.config["model"]
         logger.info("Loading SDXL base: %s", model_cfg["model_id"])
 
+        # Explicitly load the image encoder to avoid dimension mismatch (514x1664 vs 1280x1280)
+        st_cfg = self.config.get("style_transfer", {})
+        ip_adapter_model = st_cfg.get("ip_adapter_model", "h94/IP-Adapter")
+        
+        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+            ip_adapter_model,
+            subfolder="models/image_encoder",
+            torch_dtype=torch.float16,
+        ).to(self.device)
+
         self.pipe = StableDiffusionXLPipeline.from_pretrained(
             model_cfg["model_id"],
-            torch_dtype=getattr(torch, model_cfg.get("torch_dtype", "float16")),
+            image_encoder=image_encoder,
+            torch_dtype=torch.float16,
             variant=model_cfg.get("variant", "fp16"),
             use_safetensors=model_cfg.get("use_safetensors", True),
         ).to(self.device)
@@ -170,8 +182,8 @@ class DiffusionPipeline:
 
         Steps:
             1. Screen prompt for blocked concepts
-            2. Generate image with SDXL (+ optional refiner)
-            3. Apply style conditioning if style_image provided
+            2. Setup style conditioning (if requested)
+            3. Generate image with SDXL (+ optional refiner)
             4. Run post-generation safety evaluation
             5. Return result (filtered if unsafe)
         """
@@ -198,50 +210,14 @@ class DiffusionPipeline:
                 filter_reason=reason,
             )
 
-        # Step 2: Generate
         negative_prompt = self._get_negative_prompt(request.negative_prompt)
         seed = request.seed if request.seed is not None else torch.randint(0, 2**32, (1,)).item()
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
         t0 = time.perf_counter()
 
-        if request.use_refiner and self.refiner is not None:
-            # Ensemble of expert denoisers
-            latent = self.pipe(
-                prompt=request.prompt,
-                negative_prompt=negative_prompt,
-                guidance_scale=request.guidance_scale,
-                num_inference_steps=request.num_inference_steps,
-                height=request.height,
-                width=request.width,
-                denoising_end=request.high_noise_frac,
-                output_type="latent",
-                generator=generator,
-            ).images
-
-            image = self.refiner(
-                prompt=request.prompt,
-                negative_prompt=negative_prompt,
-                image=latent,
-                num_inference_steps=request.num_inference_steps,
-                denoising_start=request.high_noise_frac,
-                generator=generator,
-            ).images[0]
-        else:
-            image = self.pipe(
-                prompt=request.prompt,
-                negative_prompt=negative_prompt,
-                guidance_scale=request.guidance_scale,
-                num_inference_steps=request.num_inference_steps,
-                height=request.height,
-                width=request.width,
-                generator=generator,
-            ).images[0]
-
-        gen_time = time.perf_counter() - t0
-
-        # Step 3: Style conditioning (if requested)
-        style_scores = {}
+        # Step 2: Setup style conditioning (if requested)
+        style_img = None
         if request.style_image_path:
             if not self._ip_adapter_loaded:
                 st_cfg = self.config.get("style_transfer", {})
@@ -255,18 +231,47 @@ class DiffusionPipeline:
                     scale=request.ip_adapter_scale,
                 )
                 self._ip_adapter_loaded = True
-
+            
             style_img = prepare_style_image(request.style_image_path)
-            image = generate_with_style(
-                self.pipe,
+            self.pipe.set_ip_adapter_scale(request.ip_adapter_scale)
+        else:
+            if self._ip_adapter_loaded:
+                self.pipe.set_ip_adapter_scale(0.0)
+
+        # Step 3: Generate
+        base_kwargs = {
+            "prompt": request.prompt,
+            "negative_prompt": negative_prompt,
+            "guidance_scale": request.guidance_scale,
+            "num_inference_steps": request.num_inference_steps,
+            "height": request.height,
+            "width": request.width,
+            "generator": generator,
+        }
+
+        if style_img is not None:
+            base_kwargs["ip_adapter_image"] = style_img
+
+        if request.use_refiner and self.refiner is not None:
+            # Ensemble of expert denoisers
+            base_kwargs["output_type"] = "latent"
+            base_kwargs["denoising_end"] = request.high_noise_frac
+
+            latent = self.pipe(**base_kwargs).images
+
+            image = self.refiner(
                 prompt=request.prompt,
-                style_image=style_img,
                 negative_prompt=negative_prompt,
+                image=latent,
                 num_inference_steps=request.num_inference_steps,
-                guidance_scale=request.guidance_scale,
-                ip_adapter_scale=request.ip_adapter_scale,
-                seed=seed,
-            )
+                denoising_start=request.high_noise_frac,
+                generator=generator,
+            ).images[0]
+        else:
+            image = self.pipe(**base_kwargs).images[0]
+
+        gen_time = time.perf_counter() - t0
+        style_scores = {}
 
         # Step 4: Safety evaluation
         safety_result = self.safety.evaluate(image, check_brand=bool(self._brand_refs))
